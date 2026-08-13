@@ -119,6 +119,16 @@ function compareModelOptions(collator: Intl.Collator, a: ModelOption, b: ModelOp
     || collator.compare(a.modelId, b.modelId);
 }
 
+export function filterModelOptions(options: ModelOption[], query: string): ModelOption[] {
+  const needle = query.toLowerCase();
+  if (!needle) return options;
+  return options.filter((option) =>
+    option.provider.toLowerCase().includes(needle)
+    || option.name.toLowerCase().includes(needle)
+    || option.modelId.toLowerCase().includes(needle),
+  );
+}
+
 const THINKING_LEVEL_DESC_KEYS: Record<string, string> = {
   auto: "chatInput.thinkingAuto",
   off: "chatInput.thinkingOff",
@@ -386,6 +396,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   );
   const [value, setValue] = useState(() => (draftKey ? getDraft(draftKey)?.value ?? "" : ""));
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
+  const [modelQuery, setModelQuery] = useState("");
   const [modelDropdownRect, setModelDropdownRect] = useState<{ top: number; left: number; width: number } | null>(null);
   const [toolDropdownOpen, setToolDropdownOpen] = useState(false);
   const [thinkingDropdownOpen, setThinkingDropdownOpen] = useState(false);
@@ -1226,6 +1237,28 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     return () => window.removeEventListener("omp-composer-models-change", refresh);
   }, []);
 
+  useEffect(() => {
+    if (!modelDropdownOpen) setModelQuery("");
+  }, [modelDropdownOpen]);
+
+  useEffect(() => {
+    if (!modelDropdownOpen) return;
+    const viewport = window.visualViewport;
+    if (!viewport) return;
+    const reposition = () => {
+      const trigger = dropdownRef.current?.firstElementChild;
+      if (!(trigger instanceof HTMLElement)) return;
+      const rect = trigger.getBoundingClientRect();
+      setModelDropdownRect({ top: rect.top, left: rect.left, width: rect.width });
+    };
+    viewport.addEventListener("resize", reposition);
+    viewport.addEventListener("scroll", reposition);
+    return () => {
+      viewport.removeEventListener("resize", reposition);
+      viewport.removeEventListener("scroll", reposition);
+    };
+  }, [modelDropdownOpen]);
+
   const modelOptions: ModelOption[] = React.useMemo(() => {
     if (modelList && modelList.length > 0) {
       return modelList.map((m) => ({ provider: m.provider, modelId: m.id, name: m.name }))
@@ -1239,16 +1272,21 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     })).sort((a, b) => compareModelOptions(modelCollator, a, b));
   }, [modelList, modelNames, model?.provider, visibleModelKeys, modelCollator]);
 
+  const filteredModelOptions = React.useMemo(
+    () => filterModelOptions(modelOptions, modelQuery),
+    [modelOptions, modelQuery],
+  );
+
   // Group options by provider, preserving insertion order
   const modelsByProvider: { provider: string; options: ModelOption[] }[] = React.useMemo(() => {
     const groups: { provider: string; options: ModelOption[] }[] = [];
-    for (const opt of modelOptions) {
+    for (const opt of filteredModelOptions) {
       const group = groups.find((g) => g.provider === opt.provider);
       if (group) group.options.push(opt);
       else groups.push({ provider: opt.provider, options: [opt] });
     }
     return groups;
-  }, [modelOptions]);
+  }, [filteredModelOptions]);
 
   const displayModelName = model
     ? (modelOptions.find((o) => o.modelId === model.modelId && o.provider === model.provider)?.name
@@ -2120,9 +2158,22 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                       zIndex: 500,
                       overflow: "hidden", maxHeight: maxH, overflowY: "auto",
                       }}>
+                      {modelOptions.length > 0 && (
+                        <div style={{ position: "sticky", top: 0, zIndex: 1, padding: 8, background: "var(--bg-panel)", borderBottom: "1px solid var(--border)" }}>
+                          <input
+                            autoFocus
+                            type="search"
+                            value={modelQuery}
+                            onChange={(event) => setModelQuery(event.target.value)}
+                            placeholder={t("chatInput.searchModels")}
+                            aria-label={t("chatInput.searchModels")}
+                            style={{ width: "100%", boxSizing: "border-box", padding: "7px 9px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", fontSize: 12 }}
+                          />
+                        </div>
+                      )}
                       {modelsByProvider.length === 0 ? (
                         <div style={{ padding: "8px 12px", color: "var(--text-dim)", fontSize: 12, whiteSpace: "nowrap" }}>
-                          {showModelsLoading ? t("chatInput.loadingModels") : t("chatInput.noAvailableModels")}
+                          {showModelsLoading ? t("chatInput.loadingModels") : modelOptions.length > 0 ? t("chatInput.noMatchingModels") : t("chatInput.noAvailableModels")}
                         </div>
                       ) : modelsByProvider.map((group, gi) => (
                         <div key={group.provider}>

@@ -8,7 +8,7 @@ const jiti = createJiti(import.meta.url, {
   jsx: { runtime: "automatic" },
   tsconfigPaths: true,
 });
-const { ChatInput, ModelErrorBanner } = await jiti.import("./ChatInput.tsx");
+const { ChatInput, ModelErrorBanner, filterModelOptions } = await jiti.import("./ChatInput.tsx");
 
 test("renders the upstream model error", () => {
   const html = renderToStaticMarkup(
@@ -64,4 +64,17 @@ test("renders goal, planning, and advisor indicators at the composer", () => {
   assert.match(html, /Ship the active goal bar/);
   assert.match(html, /(Planning in progress|chatInput\.planningInProgress)/);
   assert.match(html, /(Advisor enabled|chatInput\.advisorEnabled)/);
+});
+
+const modelOptions = [
+  { provider: "anthropic", modelId: "claude-sonnet-4-6", name: "Claude Sonnet 4.6" },
+  { provider: "openai", modelId: "gpt-5.4-mini", name: "Codex Mini" },
+  { provider: "google", modelId: "gemini-3-pro", name: "Gemini Pro" },
+];
+
+test("filters model options by provider, display name, and model ID", () => {
+  assert.deepEqual(filterModelOptions(modelOptions, "ANTHROPIC"), [modelOptions[0]]);
+  assert.deepEqual(filterModelOptions(modelOptions, "CODEX"), [modelOptions[1]]);
+  assert.deepEqual(filterModelOptions(modelOptions, "3-PRO"), [modelOptions[2]]);
+  assert.deepEqual(filterModelOptions(modelOptions, "llama"), []);
 });
