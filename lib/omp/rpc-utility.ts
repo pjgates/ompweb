@@ -116,7 +116,11 @@ async function startProcess(state: UtilityRpcState): Promise<RpcProcess> {
     },
   });
   try {
-    await proc.waitReady(READY_TIMEOUT_MS);
+    const ready = await proc.waitReady(READY_TIMEOUT_MS);
+    // Responses can exceed the 1 MiB v1 frame cap (e.g. get_available_models
+    // on installs with many providers), so opt into chunked v2 framing exactly
+    // like rpc-manager does for session processes. No-op on older omp builds.
+    await proc.negotiateProtocol(ready);
   } catch (error) {
     void proc.dispose();
     throw error;
@@ -165,7 +169,8 @@ export async function runIsolatedUtilityCommand<T = unknown>(
     env: options.env,
   });
   try {
-    await proc.waitReady(READY_TIMEOUT_MS);
+    const ready = await proc.waitReady(READY_TIMEOUT_MS);
+    await proc.negotiateProtocol(ready);
     return await proc.sendCommand<T>(command, options.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS);
   } finally {
     void proc.dispose();
