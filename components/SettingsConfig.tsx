@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import dynamic from "next/dynamic";
-import { ExternalLink, RefreshCw, RotateCcw, Sparkles } from "lucide-react";
+import { Copy, ExternalLink, RefreshCw, RotateCcw, Sparkles } from "lucide-react";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/primitives";
 import { SettingsTabs, type SettingsTab } from "./SettingsTabs";
@@ -17,18 +17,13 @@ type UpdateState = {
   currentVersion: string | null;
   availableVersion: string | null;
   updateAvailable: boolean;
-};
-
-type LastUpdateInfo = {
-  status: "ok" | "failed" | "running";
-  version?: string;
-  error?: string;
-  updatedAt?: string;
+  updateCommand?: string;
 };
 
 type NativeSettings = {
   defaultThinkingLevel?: "auto" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
   hideThinkingBlock?: boolean;
+  externalThinking?: boolean;
   textVerbosity?: "low" | "medium" | "high";
   personality?: "default" | "friendly" | "pragmatic" | "none";
   advisor?: { enabled?: boolean; subagents?: boolean; syncBacklog?: "off" | "1" | "3" | "5"; immuneTurns?: number };
@@ -38,6 +33,7 @@ type NativeSettings = {
   autolearn?: { enabled?: boolean; autoContinue?: boolean; minToolCalls?: number };
   mnemopi?: { scoping?: "global" | "per-project" | "per-project-tagged"; autoRecall?: boolean; autoRetain?: boolean; noEmbeddings?: boolean };
   mcp?: { enableProjectConfig?: boolean; renderMarkdownResults?: boolean; notifications?: boolean; notificationDebounceMs?: number };
+  retry?: { enabled?: boolean; maxRetries?: number; modelFallback?: boolean };
 };
 
 const nativeSelectStyle = {
@@ -81,11 +77,8 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
   const workspaceReady = cwd !== null;
   const [update, setUpdate] = useState<UpdateState | null>(null);
   const [checking, setChecking] = useState(true);
-  const [updating, setUpdating] = useState(false);
   const [appUpdate, setAppUpdate] = useState<UpdateState | null>(null);
-  const [appLastUpdate, setAppLastUpdate] = useState<LastUpdateInfo | null>(null);
   const [checkingAppUpdate, setCheckingAppUpdate] = useState(true);
-  const [updatingApp, setUpdatingApp] = useState(false);
   const [restarting, setRestarting] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [nativeSettings, setNativeSettings] = useState<NativeSettings | null>(null);
@@ -142,10 +135,9 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
     setCheckingAppUpdate(true);
     try {
       const response = await fetch(force ? "/api/app-update?force=1" : "/api/app-update");
-      const data = await response.json() as UpdateState & { error?: string; lastUpdate?: LastUpdateInfo | null };
+      const data = await response.json() as UpdateState & { error?: string };
       if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
       setAppUpdate(data);
-      setAppLastUpdate(data.lastUpdate ?? null);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));
     } finally {
@@ -154,38 +146,6 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
   }, []);
 
   useEffect(() => { void checkForAppUpdate(); }, [checkForAppUpdate]);
-
-  const installAppUpdate = useCallback(async () => {
-    setUpdatingApp(true);
-    setMessage(null);
-    try {
-      const response = await fetch("/api/app-update", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "update" }) });
-      const data = await response.json() as { error?: string };
-      if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
-      setMessage("ompweb is updating and will restart automatically. Refresh this page when it is available again.");
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : String(error));
-    } finally {
-      setUpdatingApp(false);
-    }
-  }, []);
-
-  const installUpdate = useCallback(async () => {
-    setUpdating(true);
-    setMessage(null);
-    try {
-      const response = await fetch("/api/omp-update", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "update" }) });
-      const data = await response.json() as { error?: string };
-      if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
-      setMessage("OMP was updated. Restart active OMP sessions to use the new runtime.");
-      await checkForUpdate();
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : String(error));
-    } finally {
-      setUpdating(false);
-    }
-  }, [checkForUpdate]);
-
   const restartSessions = useCallback(async () => {
     setRestarting(true);
     try {
@@ -244,6 +204,7 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
               <NativeSetting label="Verbosity" description="Response detail for supporting providers."><select style={nativeSelectStyle} value={nativeSettings?.textVerbosity ?? "medium"} onChange={(event) => void saveNativeSettings({ ...(nativeSettings ?? {}), textVerbosity: event.target.value as NativeSettings["textVerbosity"] })}>{["low", "medium", "high"].map((level) => <option key={level} value={level}>{level}</option>)}</select></NativeSetting>
               <NativeSetting label="Personality" description="Style included in OMP's system prompt."><select style={nativeSelectStyle} value={nativeSettings?.personality ?? "default"} onChange={(event) => void saveNativeSettings({ ...(nativeSettings ?? {}), personality: event.target.value as NativeSettings["personality"] })}>{["default", "friendly", "pragmatic", "none"].map((value) => <option key={value} value={value}>{value}</option>)}</select></NativeSetting>
               <NativeSetting label="Thinking Blocks" description="Hide model reasoning from agent responses."><input type="checkbox" style={{ accentColor: "var(--accent)", width: 15, height: 15, cursor: "pointer" }} checked={nativeSettings?.hideThinkingBlock ?? false} onChange={(event) => void saveNativeSettings({ ...(nativeSettings ?? {}), hideThinkingBlock: event.target.checked })} /></NativeSetting>
+              <NativeSetting label="External Thinking" description="Private scratchpad reasoning via the think tool (disables GPT/Claude/Gemini native reasoning)."><input type="checkbox" style={{ accentColor: "var(--accent)", width: 15, height: 15, cursor: "pointer" }} checked={nativeSettings?.externalThinking ?? false} onChange={(event) => void saveNativeSettings({ ...(nativeSettings ?? {}), externalThinking: event.target.checked })} /></NativeSetting>
              </div>
            </section>
            <section style={{ padding: "16px", border: "1px solid var(--border)", borderRadius: "var(--radius-modal)", background: "var(--bg-subtle)" }}>
@@ -268,6 +229,15 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
                <NativeSetting label="Retain Completed Turns" description="Store completed conversation turns in Mnemopi memory."><input type="checkbox" style={{ accentColor: "var(--accent)", width: 15, height: 15, cursor: "pointer" }} checked={nativeSettings?.mnemopi?.autoRetain ?? true} onChange={(event) => void saveNativeSettings({ ...(nativeSettings ?? {}), mnemopi: { ...(nativeSettings?.mnemopi ?? {}), autoRetain: event.target.checked } })} /></NativeSetting>
               </div>
             </section>
+            <section style={{ padding: "16px", border: "1px solid var(--border)", borderRadius: "var(--radius-modal)", background: "var(--bg-subtle)" }}>
+              <div style={{ fontSize: 13, fontWeight: 600 }}>Retry</div>
+              <p style={{ margin: "6px 0 10px", color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5 }}>Persisted in OMP config and applied to new sessions. The retry banner in the composer can abort a live retry.</p>
+              <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(2, minmax(0, 1fr))", gap: 9 }}>
+                <NativeSetting label="Automatic Retry" description="Retry failed turns automatically."><input type="checkbox" style={{ accentColor: "var(--accent)", width: 15, height: 15, cursor: "pointer" }} checked={nativeSettings?.retry?.enabled ?? true} onChange={(event) => void saveNativeSettings({ ...(nativeSettings ?? {}), retry: { ...(nativeSettings?.retry ?? {}), enabled: event.target.checked } })} /></NativeSetting>
+                <NativeSetting label="Max Attempts" description="Retry limit before the turn is given up."><select style={nativeSelectStyle} value={String(nativeSettings?.retry?.maxRetries ?? 2)} onChange={(event) => void saveNativeSettings({ ...(nativeSettings ?? {}), retry: { ...(nativeSettings?.retry ?? {}), maxRetries: Number(event.target.value) } })}>{[0, 1, 2, 3, 4, 5].map((n) => <option key={n} value={n}>{n}</option>)}</select></NativeSetting>
+                <NativeSetting label="Model Fallback" description="Fall back to another model when retries exhaust."><input type="checkbox" style={{ accentColor: "var(--accent)", width: 15, height: 15, cursor: "pointer" }} checked={nativeSettings?.retry?.modelFallback ?? false} onChange={(event) => void saveNativeSettings({ ...(nativeSettings ?? {}), retry: { ...(nativeSettings?.retry ?? {}), modelFallback: event.target.checked } })} /></NativeSetting>
+              </div>
+            </section>
             {nativeSettingsError && <p role="alert" style={{ margin: 0, color: "var(--status-error)", fontSize: 12 }}>{nativeSettingsError}</p>}
           <section style={{ borderTop: "1px solid var(--border)", paddingTop: 18 }}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
@@ -279,8 +249,13 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
               </div>
               <button type="button" onClick={() => void checkForAppUpdate(true)} disabled={checkingAppUpdate} aria-label="Check ompweb updates" style={{ padding: 7, border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "transparent", color: "var(--text-muted)", cursor: checkingAppUpdate ? "wait" : "pointer" }}><RefreshCw size={14} aria-hidden="true" /></button>
             </div>
-            {appUpdate?.updateAvailable && <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 12 }}><button type="button" onClick={() => void installAppUpdate()} disabled={updatingApp} style={{ padding: "7px 11px", border: "none", borderRadius: "var(--radius-control)", background: "var(--accent)", color: "var(--on-accent)", cursor: updatingApp ? "wait" : "pointer", fontSize: 12 }}>{updatingApp ? "Updating..." : "Update ompweb"}</button></div>}
-            {appLastUpdate?.status === "failed" && <p role="alert" style={{ margin: "10px 0 0", color: "var(--status-error)", fontSize: 12, lineHeight: 1.5 }}>Last update attempt failed and the previous version was restored: {appLastUpdate.error ?? "unknown error"}</p>}
+            {appUpdate?.updateAvailable && <div style={{ marginTop: 12, padding: "10px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", display: "flex", flexDirection: "column", gap: 6 }}>
+              <div style={{ fontSize: 12, color: "var(--text-muted)" }}>Run this command in terminal to update ompweb:</div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <code style={{ flex: 1, fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--accent)", wordBreak: "break-all" }}>{appUpdate.updateCommand || "npm install -g @kahme247/ompweb"}</code>
+                <button type="button" onClick={() => { void navigator.clipboard.writeText(appUpdate.updateCommand || "npm install -g @kahme247/ompweb"); setMessage("Copied update command to clipboard."); }} style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "4px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-subtle)", color: "var(--text)", cursor: "pointer", fontSize: 11 }}><Copy size={12} aria-hidden="true" /> Copy</button>
+              </div>
+            </div>}
           </section>
           <section style={{ borderTop: "1px solid var(--border)", paddingTop: 18 }}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
@@ -292,8 +267,14 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
               </div>
               <button type="button" onClick={() => void checkForUpdate()} disabled={checking} aria-label="Check OMP updates" style={{ padding: 7, border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "transparent", color: "var(--text-muted)", cursor: checking ? "wait" : "pointer" }}><RefreshCw size={14} aria-hidden="true" /></button>
             </div>
+            {update?.updateAvailable && <div style={{ marginTop: 12, padding: "10px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", display: "flex", flexDirection: "column", gap: 6 }}>
+              <div style={{ fontSize: 12, color: "var(--text-muted)" }}>Run this command in terminal to update OMP runtime:</div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <code style={{ flex: 1, fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--accent)", wordBreak: "break-all" }}>{update.updateCommand || "omp update"}</code>
+                <button type="button" onClick={() => { void navigator.clipboard.writeText(update.updateCommand || "omp update"); setMessage("Copied update command to clipboard."); }} style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "4px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-subtle)", color: "var(--text)", cursor: "pointer", fontSize: 11 }}><Copy size={12} aria-hidden="true" /> Copy</button>
+              </div>
+            </div>}
             <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 12 }}>
-              {update?.updateAvailable && <button type="button" onClick={() => void installUpdate()} disabled={updating} style={{ padding: "7px 11px", border: "none", borderRadius: "var(--radius-control)", background: "var(--accent)", color: "var(--on-accent)", cursor: updating ? "wait" : "pointer", fontSize: 12 }}>{updating ? "Updating..." : "Install OMP update"}</button>}
               <button type="button" onClick={() => void restartSessions()} disabled={restarting} style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "7px 11px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "transparent", color: "var(--text)", cursor: restarting ? "wait" : "pointer", fontSize: 12 }}><RotateCcw size={13} aria-hidden="true" /> {restarting ? "Restarting..." : "Restart OMP sessions"}</button>
               <a href="https://github.com/can1357/oh-my-pi/releases" target="_blank" rel="noreferrer" style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "7px 11px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", color: "var(--text-muted)", textDecoration: "none", fontSize: 12 }}><ExternalLink size={13} aria-hidden="true" /> Changelog</a>
             </div>

@@ -86,6 +86,9 @@ export interface WebSessionState {
   isBashRunning: boolean;
   isCompacting: boolean;
   autoCompactionEnabled: boolean;
+  interruptMode: "immediate" | "wait";
+  steeringMode: "all" | "one-at-a-time";
+  followUpMode: "all" | "one-at-a-time";
   model?: ModelLike & { name?: string; reasoning?: boolean; thinking?: { efforts?: string[] } };
   messageCount: number;
   queuedMessageCount: number;
@@ -171,3 +174,84 @@ export type OmpExtensionUiRequest =
   | { type: "extension_ui_request"; id: string; method: "setTitle"; title: string }
   | { type: "extension_ui_request"; id: string; method: "set_editor_text"; text: string }
   | { type: "extension_ui_request"; id: string; method: "open_url"; url: string; launchUrl?: string; instructions?: string };
+
+/**
+ * omp's RPC host-tool bridge: omp-web registers host tools (set_host_tools)
+ * that the agent can call; the server emits host_tool_call frames the UI
+ * executes, and the UI answers with host_tool_result. Mirrors
+ * oh-my-pi modes/rpc/rpc-types.ts.
+ */
+export interface HostToolParameter {
+  type?: string;
+  description?: string;
+  [key: string]: unknown;
+}
+
+export interface HostToolDefinition {
+  name: string;
+  label?: string;
+  description: string;
+  parameters: Record<string, unknown>;
+  hidden?: boolean;
+  loadMode?: "always" | "discoverable" | "explicit";
+}
+
+export interface HostToolCallFrame {
+  type: "host_tool_call";
+  id: string;
+  toolCallId: string;
+  toolName: string;
+  arguments: Record<string, unknown>;
+}
+
+export interface HostToolCancelFrame {
+  type: "host_tool_cancel";
+  id: string;
+  targetId: string;
+}
+
+export interface HostToolResultFrame {
+  type: "host_tool_result";
+  id: string;
+  result: unknown;
+  isError?: boolean;
+}
+
+/**
+ * omp's RPC host-URI bridge: the host registers URL schemes
+ * (set_host_uri_schemes) that the agent's read/write tools resolve through
+ * the UI; the server emits host_uri_request frames the UI satisfies with
+ * host_uri_result. Mirrors oh-my-pi modes/rpc/rpc-types.ts.
+ */
+export interface HostUriSchemeDefinition {
+  scheme: string;
+  description?: string;
+  writable?: boolean;
+  immutable?: boolean;
+}
+
+export type HostUriOperation = "read" | "write";
+
+export interface HostUriRequestFrame {
+  type: "host_uri_request";
+  id: string;
+  operation: HostUriOperation;
+  url: string;
+  /** Present for write operations. */
+  content?: string;
+}
+
+export interface HostUriCancelFrame {
+  type: "host_uri_cancel";
+  id: string;
+  targetId: string;
+}
+
+export interface HostUriResultFrame {
+  type: "host_uri_result";
+  id: string;
+  content?: string;
+  contentType?: "text/markdown" | "application/json" | "text/plain";
+  isError?: boolean;
+  error?: string;
+}

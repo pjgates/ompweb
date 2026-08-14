@@ -2,10 +2,12 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { dirname } from "path";
 import { isMap, parseDocument, stringify } from "yaml";
 import { getSettingsPath } from "./paths";
+import { isRecord } from "../type-guards";
 
 export type NativeSettings = {
   defaultThinkingLevel?: "auto" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
   hideThinkingBlock?: boolean;
+  externalThinking?: boolean;
   textVerbosity?: "low" | "medium" | "high";
   personality?: "default" | "friendly" | "pragmatic" | "none";
   advisor?: { enabled?: boolean; subagents?: boolean; syncBacklog?: "off" | "1" | "3" | "5"; immuneTurns?: number };
@@ -41,10 +43,6 @@ const MEMORY_SCOPES = new Set(["global", "per-project", "per-project-tagged"]);
 
 function configPath(): string {
   return getSettingsPath();
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function stringArray(value: unknown): string[] | undefined {
@@ -90,6 +88,7 @@ export function readNativeSettings(): { path: string; settings: NativeSettings }
     settings: {
       ...(THINKING_LEVELS.has(data.defaultThinkingLevel as string) ? { defaultThinkingLevel: data.defaultThinkingLevel as NativeSettings["defaultThinkingLevel"] } : {}),
       ...(typeof data.hideThinkingBlock === "boolean" ? { hideThinkingBlock: data.hideThinkingBlock } : {}),
+      ...(typeof data.externalThinking === "boolean" ? { externalThinking: data.externalThinking } : {}),
       ...(TEXT_VERBOSITIES.has(data.textVerbosity as string) ? { textVerbosity: data.textVerbosity as NativeSettings["textVerbosity"] } : {}),
       ...(PERSONALITIES.has(data.personality as string) ? { personality: data.personality as NativeSettings["personality"] } : {}),
       ...(Object.keys(advisor).length ? {
@@ -162,6 +161,7 @@ export function writeNativeSettings(settings: NativeSettings): void {
   assertOptionalRecord(settings.mcp, "mcp");
   for (const [name, value] of Object.entries({
     hideThinkingBlock: settings.hideThinkingBlock,
+    externalThinking: settings.externalThinking,
     "advisor.enabled": settings.advisor?.enabled,
     "advisor.subagents": settings.advisor?.subagents,
     "retry.enabled": settings.retry?.enabled,
@@ -215,6 +215,7 @@ export function writeNativeSettings(settings: NativeSettings): void {
   if (!isMap(doc.contents)) throw new Error(`${path} must contain a YAML mapping`);
   if (settings.defaultThinkingLevel !== undefined) doc.set("defaultThinkingLevel", settings.defaultThinkingLevel);
   if (settings.hideThinkingBlock !== undefined) doc.set("hideThinkingBlock", settings.hideThinkingBlock);
+  if (settings.externalThinking !== undefined) doc.set("externalThinking", settings.externalThinking);
   if (settings.textVerbosity !== undefined) doc.set("textVerbosity", settings.textVerbosity);
   if (settings.personality !== undefined) doc.set("personality", settings.personality);
   for (const [key, value] of Object.entries(settings.advisor ?? {})) doc.setIn(["advisor", key], value);

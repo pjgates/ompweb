@@ -1,11 +1,12 @@
 "use client";
 
-import React, { useRef, useState, useCallback, useEffect, useImperativeHandle, forwardRef, KeyboardEvent } from "react";
+import React, { useRef, useState, useCallback, useEffect, useImperativeHandle, forwardRef, memo, KeyboardEvent } from "react";
 import { ListChecks, Sparkles, Target } from "lucide-react";
 import type { BuiltinSlashCommandResult, CompactResultInfo, QueuedMessages, SlashCommandInfo } from "@/hooks/useAgentSession";
 import type { ActiveGoal, ActivePlan } from "@/lib/web-mode-state";
 import { formatGoalElapsed } from "@/lib/web-mode-state";
 import { toast } from "@/components/ui/toast";
+import { formatCompactNumber } from "@/lib/format";
 import { clearDraft, getDraft, setDraft, type ChatDraftFile, type ChatDraftImage } from "@/lib/draft-store";
 import { WEB_SLASH_COMMANDS, expandWebSlashCommand } from "@/lib/web-slash-commands";
 import {
@@ -60,6 +61,16 @@ interface Props {
   fastModeEnabled?: boolean;
   fastModeSupported?: boolean;
   onFastModeChange?: (enabled: boolean) => void;
+  /** Runtime session modes (set_interrupt_mode / set_auto_compaction RPC). */
+  interruptMode?: "immediate" | "wait";
+  onInterruptModeChange?: (mode: "immediate" | "wait") => void;
+  autoCompactionEnabled?: boolean;
+  onAutoCompactionChange?: (enabled: boolean) => void;
+  /** Queue delivery modes (set_steering_mode / set_follow_up_mode RPC). */
+  steeringMode?: "all" | "one-at-a-time";
+  onSteeringModeChange?: (mode: "all" | "one-at-a-time") => void;
+  followUpMode?: "all" | "one-at-a-time";
+  onFollowUpModeChange?: (mode: "all" | "one-at-a-time") => void;
   onCompact?: () => void;
   onAbortCompaction?: () => void;
   isCompacting?: boolean;
@@ -74,6 +85,9 @@ interface Props {
   /** Display name for the current model when the catalog does not know it. */
   modelNameOverride?: string | null;
   retryInfo?: { attempt: number; maxAttempts: number; errorMessage?: string } | null;
+  onAbortRetry?: () => void;
+  /** Abort the running agent and send the message as a fresh prompt (abort_and_prompt). */
+  onInterruptAndReply?: (message: string, images?: AttachedImage[]) => Promise<boolean> | boolean;
   queuedMessages?: QueuedMessages | null;
   inputHistory?: string[];
   onRecallQueue?: () => void;
@@ -141,9 +155,7 @@ const THINKING_LEVEL_DESC_KEYS: Record<string, string> = {
 };
 
 function formatTokenCount(tokens: number, locale: string): string {
-  if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M`;
-  if (tokens >= 1_000) return `${Math.round(tokens / 1_000)}k`;
-  return tokens.toLocaleString(locale);
+  return formatCompactNumber(tokens, locale);
 }
 
 type SlashCommandSource = "builtin" | "extension" | "prompt" | "skill" | "ompBuiltin";
@@ -373,11 +385,13 @@ function ComposerModeStatus({ goal, plan }: { goal?: ActiveGoal | null; plan?: A
   );
 }
 
-export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
+export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatInput({
   onSend, onAbort, onSteer, onFollowUp, isStreaming, model, isAutoModelSelection, modelNames, modelList, modelError, modelsLoading, onModelChange, fastModeEnabled, fastModeSupported, onFastModeChange,
   onCompact, onAbortCompaction, isCompacting, compactError, compactResult, toolPreset, onToolPresetChange,
   thinkingLevel, onThinkingLevelChange, availableThinkingLevels, thinkingLevelMap, modelNameOverride,
-  retryInfo, queuedMessages, inputHistory = [], onRecallQueue,
+  retryInfo, queuedMessages, inputHistory = [], onRecallQueue, onAbortRetry, onInterruptAndReply,
+  interruptMode, onInterruptModeChange, autoCompactionEnabled, onAutoCompactionChange,
+  steeringMode, onSteeringModeChange, followUpMode, onFollowUpModeChange,
   slashCommands, slashCommandsLoading, onLoadSlashCommands,
   onBuiltinCommand,
   soundEnabled, onSoundToggle, onAudioUnlock,
@@ -1013,6 +1027,16 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     clearInput();
   }, [value, attachedImages, attachedTextFiles, onPromptWithStreamingBehavior, onSteer, onFollowUp, clearInput, onAudioUnlock, t]);
 
+  /** Abort the running agent and send the current draft as a fresh prompt. */
+  const sendWithInterrupt = useCallback(() => {
+    if (!onInterruptAndReply) return;
+    const msg = value.trim();
+    if (!msg && !attachedImages.length && !attachedTextFiles.length) return;
+    void Promise.resolve(onInterruptAndReply(msg, attachedImages.length ? attachedImages : undefined)).then((ok) => {
+      if (ok) clearInput();
+    });
+  }, [onInterruptAndReply, value, attachedImages, attachedTextFiles, clearInput]);
+
   const getNextSlashIndex = useCallback((direction: "up" | "down" | "left" | "right") => {
     const lastIndex = filteredSlashCommands.length - 1;
     if (lastIndex < 0) return 0;
@@ -1410,6 +1434,32 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
               }}>
                 {t("chatInput.queuedCount", { count: (queuedMessages?.steering.length ?? 0) + (queuedMessages?.followUp.length ?? 0) })}
               </span>
+              {(onSteeringModeChange || onFollowUpModeChange) && (
+                <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                  {onSteeringModeChange && (
+                    <select
+                      value={steeringMode}
+                      onChange={(e) => onSteeringModeChange(e.target.value as "all" | "one-at-a-time")}
+                      title="How queued steering messages are delivered"
+                      style={{ fontSize: 10, fontFamily: "var(--font-mono)", color: "var(--text-dim)", background: "transparent", border: "1px solid var(--border)", borderRadius: 5, padding: "1px 4px", cursor: "pointer" }}
+                    >
+                      <option value="one-at-a-time">Steer: one</option>
+                      <option value="all">Steer: all</option>
+                    </select>
+                  )}
+                  {onFollowUpModeChange && (
+                    <select
+                      value={followUpMode}
+                      onChange={(e) => onFollowUpModeChange(e.target.value as "all" | "one-at-a-time")}
+                      title="How queued follow-up messages are delivered"
+                      style={{ fontSize: 10, fontFamily: "var(--font-mono)", color: "var(--text-dim)", background: "transparent", border: "1px solid var(--border)", borderRadius: 5, padding: "1px 4px", cursor: "pointer" }}
+                    >
+                      <option value="one-at-a-time">Follow: one</option>
+                      <option value="all">Follow: all</option>
+                    </select>
+                  )}
+                </div>
+              )}
               {onRecallQueue && (
                 <button
                   onClick={onRecallQueue}
@@ -1466,6 +1516,29 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
               <path d="M3 3v5h5" />
             </svg>
             {t("chatInput.retrying", { attempt: retryInfo.attempt, maxAttempts: retryInfo.maxAttempts })}{retryInfo.errorMessage && <span style={{ opacity: 0.7, marginLeft: 4 }}>— {retryInfo.errorMessage}</span>}
+            {onAbortRetry && (
+              <button
+                type="button"
+                onClick={onAbortRetry}
+                title="Stop the automatic retry and leave the failed turn as-is"
+                style={{
+                  marginLeft: "auto",
+                  padding: "3px 9px",
+                  fontSize: 11,
+                  color: "var(--status-warning)",
+                  background: "transparent",
+                  border: "1px solid color-mix(in srgb, var(--status-warning) 45%, transparent)",
+                  borderRadius: 6,
+                  cursor: "pointer",
+                  whiteSpace: "nowrap",
+                  transition: "background var(--dur-fast) var(--ease-out-warm)",
+                }}
+                onMouseEnter={(e) => { e.currentTarget.style.background = "color-mix(in srgb, var(--status-warning) 12%, transparent)"; }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
+              >
+                Abort retry
+              </button>
+            )}
           </div>
         )}
         {compactResultText && (
@@ -1955,6 +2028,29 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
           {isStreaming ? (
             <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0, alignSelf: "flex-end" }}>
+              {onInterruptAndReply && (
+                <button
+                  onClick={sendWithInterrupt}
+                  disabled={!canQueueStreamingMessage}
+                  title={(attachedImages.length || attachedTextFiles.length) ? t("chatInput.imagesCannotQueue") : t("chatInput.interruptReplyTitle")}
+                  style={{
+                    display: "flex", alignItems: "center", gap: 5,
+                    padding: "7px 12px",
+                    background: canQueueStreamingMessage ? "color-mix(in srgb, var(--accent-strong) 12%, transparent)" : "none",
+                    border: "1px solid color-mix(in srgb, var(--accent-strong) 40%, transparent)",
+                    borderRadius: 8,
+                    color: canQueueStreamingMessage ? "var(--accent-strong)" : "var(--text-dim)",
+                    cursor: canQueueStreamingMessage ? "pointer" : "not-allowed",
+                    fontSize: 13, fontWeight: 600, letterSpacing: "-0.01em",
+                    transition: "background var(--dur-fast) var(--ease-out-warm)",
+                  }}
+                >
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true">
+                    <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+                  </svg>
+                  {t("chatInput.interruptReply")}
+                </button>
+              )}
               {onSteer && (
                 <button
                   onClick={() => sendQueued("steer")}
@@ -2012,7 +2108,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 alignSelf: "flex-end",
                 display: "flex", alignItems: "center", gap: 6,
                 padding: "7px 14px",
-                background: (value.trim() || attachedImages.length || attachedTextFiles.length) ? "var(--accent)" : "var(--bg-panel)",
+                background: (value.trim() || attachedImages.length || attachedTextFiles.length) ? "var(--accent-strong)" : "var(--bg-panel)",
                 border: "none",
                 borderRadius: 8,
                 color: (value.trim() || attachedImages.length || attachedTextFiles.length) ? "var(--on-accent)" : "var(--text-dim)",
@@ -2283,6 +2379,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
               display: isMobile ? (controlsMenuOpen ? "flex" : "none") : "flex",
               alignItems: "center",
               gap: isMobile ? 1 : 2,
+              flexWrap: isMobile ? "nowrap" : "wrap",
+              justifyContent: isMobile ? "flex-end" : "flex-end",
               ...(isMobile ? {
                 position: "absolute",
                 right: 0,
@@ -2300,6 +2398,30 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 backdropFilter: "blur(10px)",
               } : null),
             }}>
+            {onInterruptModeChange && (
+              <button
+                type="button"
+                onClick={() => onInterruptModeChange(interruptMode === "immediate" ? "wait" : "immediate")}
+                title={interruptMode === "immediate"
+                  ? "Steering interrupts the agent immediately"
+                  : "Steering waits for the current step to finish"}
+                aria-pressed={interruptMode === "wait"}
+                style={{ height: 32, padding: isMobile ? "0 6px" : "0 10px", border: "1px solid var(--border)", borderRadius: 9, background: interruptMode === "wait" ? "var(--bg-selected)" : "transparent", color: interruptMode === "wait" ? "var(--accent)" : "var(--text-muted)", cursor: "pointer", fontSize: 12, fontWeight: 600 }}
+              >
+                {isMobile ? `I: ${interruptMode === "immediate" ? "Now" : "Wait"}` : `Interrupt: ${interruptMode === "immediate" ? "Now" : "Wait"}`}
+              </button>
+            )}
+            {onAutoCompactionChange && (
+              <button
+                type="button"
+                onClick={() => onAutoCompactionChange(!autoCompactionEnabled)}
+                title={autoCompactionEnabled ? "Automatic context compaction is on" : "Automatic context compaction is off"}
+                aria-pressed={autoCompactionEnabled}
+                style={{ height: 32, padding: isMobile ? "0 6px" : "0 10px", border: "1px solid var(--border)", borderRadius: 9, background: autoCompactionEnabled ? "var(--bg-selected)" : "transparent", color: autoCompactionEnabled ? "var(--accent)" : "var(--text-muted)", cursor: "pointer", fontSize: 12, fontWeight: 600 }}
+              >
+                {isMobile ? `AC: ${autoCompactionEnabled ? "On" : "Off"}` : `Auto-Compact: ${autoCompactionEnabled ? "On" : "Off"}`}
+              </button>
+            )}
             {!isStreaming && fastModeSupported && onFastModeChange && (
               <button
                 type="button"
@@ -2321,8 +2443,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                   style={{
                     display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
                     padding: isMobile ? 0 : "8px 12px",
-                    width: isMobile ? 44 : undefined,
-                    height: isMobile ? 44 : 32,
+                    width: isMobile ? 32 : undefined,
+                    height: 32,
                     background: thinkingDropdownOpen ? "var(--bg-hover)" : "none",
                     border: "none",
                     borderRadius: 9,
@@ -2472,9 +2594,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 {compactError && (
                   <div style={{
                     position: "absolute", bottom: "calc(100% + 6px)", right: 0,
-                    background: "#1f2937", color: "var(--status-error)",
+                    background: "var(--bg-panel)", color: "var(--status-error)",
                     fontSize: 11, padding: "4px 8px", borderRadius: 5,
-                    whiteSpace: "nowrap", pointerEvents: "none",
+                    maxWidth: 260, whiteSpace: "pre-wrap", pointerEvents: "none",
                     boxShadow: "var(--shadow-pop)", zIndex: 50,
                   }}>
                     {compactError}
@@ -2554,8 +2676,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 aria-label={soundEnabled ? t("chatInput.disableSound") : t("chatInput.enableSound")}
                 style={{
                   display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
-                  width: isMobile ? 44 : 32,
-                  height: isMobile ? 44 : 32,
+                  width: 32,
+                  height: 32,
                   padding: 0,
                   background: "none",
                   border: "none",
@@ -2638,4 +2760,4 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       </div>
     </div>
   );
-});
+}));

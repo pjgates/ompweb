@@ -420,7 +420,7 @@ export function ChatWindow({ session, newSessionCwd, advisorEnabled, toolCallsDe
 
   const {
     loading, error, messages, entryIds, streamState,
-    agentRunning, bashRunning, pendingBash, modelNames, modelList, modelsLoading, modelError, modelThinkingLevels, modelThinkingLevelMaps, toolPreset, thinkingLevel, fastModeEnabled,
+    agentRunning, bashRunning, pendingBash, modelNames, modelList, modelsLoading, modelError, modelThinkingLevels, modelThinkingLevelMaps, toolPreset, thinkingLevel, fastModeEnabled, interruptMode, autoCompactionEnabled, steeringMode, followUpMode,
     liveModelMeta,
     retryInfo, contextUsage, forkingEntryId,
     isCompacting, compactError, compactResult, displayModel: displayModelValue, sessionStats,
@@ -435,10 +435,11 @@ export function ChatWindow({ session, newSessionCwd, advisorEnabled, toolCallsDe
     handleCompact, handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction,
     handleRecallQueue,
     handleBuiltinSlashCommand,
-    handleToolPresetChange, handleThinkingLevelChange, handleFastModeChange, loadSlashCommands,
+    handleToolPresetChange, handleThinkingLevelChange, handleFastModeChange, handleInterruptModeChange, handleAutoCompactionChange, handleSteeringModeChange, handleFollowUpModeChange, handleCycleModel, handleCycleThinkingLevel, handleAbortRetry, handleInterruptAndReply, loadSlashCommands,
   } = useAgentSession({
     session, newSessionCwd, advisorEnabled, onAgentEnd: wrappedOnAgentEnd, onSessionCreated, onSessionForked,
     modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
+    onOpenFile,
   });
   const sessionBusy = agentRunning || bashRunning;
 
@@ -446,6 +447,26 @@ export function ChatWindow({ session, newSessionCwd, advisorEnabled, toolCallsDe
   useEffect(() => {
     registerAbortHandler(sessionBusy ? handleAbort : null);
   }, [sessionBusy, handleAbort]);
+
+  // Cycle model / thinking level via ⌘/Ctrl+Alt+M and ⌘/Ctrl+Alt+T (RPC
+  // cycle_model / cycle_thinking_level). Meta/Alt combos avoid clashing with
+  // ordinary typing in the composer.
+  useEffect(() => {
+    if (!session) return;
+    const handler = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || !e.altKey) return;
+      const key = e.key.toLowerCase();
+      if (key === "m") {
+        e.preventDefault();
+        void handleCycleModel();
+      } else if (key === "t") {
+        e.preventDefault();
+        void handleCycleThinkingLevel();
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [session, handleCycleModel, handleCycleThinkingLevel]);
 
   // --- Lazy-load historical messages ---
   // Only render the last N messages initially. When the user scrolls to the
@@ -594,19 +615,29 @@ export function ChatWindow({ session, newSessionCwd, advisorEnabled, toolCallsDe
 
     return { toolResultsMap, lastAnchorIdx, visibleRefIndexByMessage };
   }, [messages]);
-  const pendingToolHeaders = useMemo(() => {
-    if (agentPhase?.kind !== "running_tools") return [];
+  // Tool-call ids already rendered by COMMITTED messages — memoized away from
+  // the streaming path so a per-token update only re-scans the live bubble.
+  const committedToolCallIds = useMemo(() => {
     const renderedIds = new Set<string>();
-    const collect = (message: Partial<AgentMessage> | null) => {
-      if (message?.role !== "assistant") return;
+    for (const message of messages) {
+      if (message?.role !== "assistant") continue;
       for (const block of (message as Partial<AssistantMessage>).content ?? []) {
         if (block.type === "toolCall") renderedIds.add(block.toolCallId);
       }
-    };
-    for (const message of messages) collect(message);
-    collect(streamState.streamingMessage);
+    }
+    return renderedIds;
+  }, [messages]);
+  const pendingToolHeaders = useMemo(() => {
+    if (agentPhase?.kind !== "running_tools") return [];
+    const renderedIds = new Set(committedToolCallIds);
+    const streaming = streamState.streamingMessage;
+    if (streaming?.role === "assistant") {
+      for (const block of (streaming as Partial<AssistantMessage>).content ?? []) {
+        if (block.type === "toolCall") renderedIds.add(block.toolCallId);
+      }
+    }
     return agentPhase.tools.filter((tool) => !renderedIds.has(tool.id));
-  }, [agentPhase, messages, streamState.streamingMessage]);
+  }, [agentPhase, committedToolCallIds, streamState.streamingMessage]);
 
   const isEmptyNew = isNew && messages.length === 0 && !streamState.isStreaming && !sessionBusy;
   const messageCwd = session?.cwd ?? newSessionCwd ?? undefined;
@@ -651,6 +682,16 @@ export function ChatWindow({ session, newSessionCwd, advisorEnabled, toolCallsDe
       fastModeEnabled={fastModeEnabled}
       fastModeSupported={Boolean(displayModelValue && modelList.some((entry) => entry.provider === displayModelValue.provider && entry.id === displayModelValue.modelId && entry.supportsFastMode))}
       onFastModeChange={session || isNew ? handleFastModeChange : undefined}
+      interruptMode={interruptMode}
+      onInterruptModeChange={session ? handleInterruptModeChange : undefined}
+      autoCompactionEnabled={autoCompactionEnabled}
+      onAutoCompactionChange={session ? handleAutoCompactionChange : undefined}
+      steeringMode={steeringMode}
+      onSteeringModeChange={session ? handleSteeringModeChange : undefined}
+      followUpMode={followUpMode}
+      onFollowUpModeChange={session ? handleFollowUpModeChange : undefined}
+      onAbortRetry={session ? handleAbortRetry : undefined}
+      onInterruptAndReply={session ? handleInterruptAndReply : undefined}
       availableThinkingLevels={availableThinkingLevels}
       thinkingLevelMap={currentThinkingLevelMap}
       modelNameOverride={liveModelMeta?.name ?? null}
@@ -802,7 +843,10 @@ export function ChatWindow({ session, newSessionCwd, advisorEnabled, toolCallsDe
             <NoticeShelf notices={notices} floating align="right" />
           </div>
         </div>
-        <div ref={scrollContainerRef} className="flex-1 overflow-y-auto pt-4 [scrollbar-width:none]">
+        {/* Hide the Firefox scrollbar on desktop only: ChatMinimap provides the
+            position indicator there, but on mobile there is no minimap and
+            users need the scrollbar (Chrome's overlay scrollbar still shows). */}
+        <div ref={scrollContainerRef} className={`flex-1 overflow-y-auto pt-4${isMobile ? "" : " [scrollbar-width:none]"}`}>
           <div style={{ padding: `0 ${CHAT_COLUMN_PADDING}px` }}>
             <div style={{ maxWidth: 820, margin: "0 auto" }}>
               <ExtensionStatusBar statuses={extensionStatuses} />

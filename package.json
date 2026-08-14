@@ -1,6 +1,6 @@
 {
   "name": "@kahme247/ompweb",
-  "version": "0.2.9",
+  "version": "0.3.0",
   "description": "Web UI for the oh-my-pi (omp) coding agent",
   "homepage": "https://github.com/kahme247/ompweb#readme",
   "repository": {
@@ -46,10 +46,10 @@
     "@base-ui/react": "^1.6.0",
     "cmdk": "^1.1.1",
     "lucide-react": "^1.27.0",
-    "motion": "^12.42.2",
     "next": "16.3.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
+    "react-syntax-highlighter": "^16.1.1",
     "undici": "8.10.0",
     "yaml": "^2"
   },
@@ -68,7 +68,6 @@
     "mermaid": "^11.14.0",
     "postcss": "^8",
     "react-markdown": "^10.1.0",
-    "react-syntax-highlighter": "^16.1.1",
     "rehype-katex": "^7.0.1",
     "rehype-raw": "^7.0.0",
     "rehype-sanitize": "^6.0.0",

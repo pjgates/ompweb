@@ -198,6 +198,17 @@ export class AgentSessionWrapper {
   private restarting = false;
   private mcpListWaiter: { resolve: (text: string) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
   private _alive = true;
+  /** Host tools the web UI registered via set_host_tools (agent-callable). */
+  private hostToolNames: Set<string> = new Set();
+  /** host_tool_call ids awaiting a host_tool_result from the browser. */
+  private pendingHostTools: Map<string, AgentEvent> = new Map();
+  /** URI schemes the web UI registered via set_host_uri_schemes. */
+  private hostUriSchemes: Map<string, { writable?: boolean }> = new Map();
+  /** host_uri_request ids awaiting a host_uri_result from the browser. */
+  private pendingHostUris: Map<string, AgentEvent> = new Map();
+  /** Resolves once an in-flight destroyAndWait finishes; null when idle. Read
+   * by startRpcSession so a replacement spawn awaits the old child's exit. */
+  destroyPromise: Promise<void> | null = null;
   private _sessionId = "";
   private _sessionFile = "";
   private _sessionName: string | undefined;
@@ -346,9 +357,65 @@ export class AgentSessionWrapper {
         }
         break;
       }
-      case "host_tool_call":
+      case "host_tool_call": {
+        const id = typeof event.id === "string" ? event.id : "";
+        const toolName = typeof event.toolName === "string" ? event.toolName : "";
+        // Route REGISTERED host tools to an attached UI (the browser answers
+        // via host_tool_result); unregistered tools or no attached listener
+        // are rejected immediately so the agent never hangs on a tool nobody
+        // will answer.
+        if (id && toolName && this.hostToolNames.has(toolName) && this.listeners.length > 0) {
+          this.pendingHostTools.set(id, event);
+          this.emit(event);
+          notifyRunningChange();
+          return;
+        }
+        // Unregistered tool / no listener: reject (emits a notice) and do NOT
+        // re-emit the frame — the UI must not answer a call nobody routed.
         this.rejectUnexpectedHostTool(event);
+        return;
+      }
+      case "host_tool_cancel": {
+        const targetId = typeof event.targetId === "string" ? event.targetId : "";
+        if (targetId && this.pendingHostTools.delete(targetId)) {
+          this.emit(event);
+          notifyRunningChange();
+          return;
+        }
         break;
+      }
+      case "host_uri_request": {
+        const id = typeof event.id === "string" ? event.id : "";
+        const url = typeof event.url === "string" ? event.url : "";
+        // Route registered schemes to an attached UI (the browser answers via
+        // host_uri_result); unknown schemes / no listener are rejected so the
+        // agent's read/write never hangs.
+        const scheme = url.split(":")[0] ?? "";
+        const operation = event.operation === "write" ? "write" : "read";
+        const registered = this.hostUriSchemes.get(scheme);
+        if (id && scheme && registered && (operation !== "write" || registered.writable) && this.listeners.length > 0) {
+          this.pendingHostUris.set(id, event);
+          this.emit(event);
+          notifyRunningChange();
+          return;
+        }
+        this.proc.sendFrame({
+          type: "host_uri_result",
+          id,
+          isError: true,
+          error: `URI scheme \"${scheme}\" is not registered by omp-web`,
+        });
+        return;
+      }
+      case "host_uri_cancel": {
+        const targetId = typeof event.targetId === "string" ? event.targetId : "";
+        if (targetId && this.pendingHostUris.delete(targetId)) {
+          this.emit(event);
+          notifyRunningChange();
+          return;
+        }
+        break;
+      }
     }
 
     this.emit(event);
@@ -427,10 +494,10 @@ export class AgentSessionWrapper {
   }
 
   /**
-   * omp-web never registers RPC host tools: allowing a browser-originated host
-   * callback to run a command would bypass the workspace allow-list. Should a
-   * future extension still issue one, settle it explicitly so its agent turn
-   * cannot hang forever waiting for a response.
+   * Settle a host_tool_call the UI did not register (or arrived with no
+   * attached listener) with an explicit error so its agent turn cannot hang
+   * forever waiting for a response. Registered host tools are routed to
+   * listeners in handleFrame (see the host_tool_call case).
    */
   private rejectUnexpectedHostTool(event: AgentEvent): void {
     const id = typeof event.id === "string" ? event.id : "";
@@ -448,6 +515,32 @@ export class AgentSessionWrapper {
       },
     });
     this.emit({ type: "notice", level: "warning", message: `Rejected unavailable host tool: ${toolName}` });
+  }
+
+  /** Reject every outstanding host tool call (browser disconnected / destroy). */
+  private rejectPendingHostTools(message: string): void {
+    for (const id of this.pendingHostTools.keys()) {
+      this.proc.sendFrame({
+        type: "host_tool_result",
+        id,
+        isError: true,
+        result: { content: [{ type: "text", text: message }] },
+      });
+    }
+    this.pendingHostTools.clear();
+  }
+
+  /** Reject every outstanding host URI request (browser disconnected / destroy). */
+  private rejectPendingHostUris(message: string): void {
+    for (const id of this.pendingHostUris.keys()) {
+      this.proc.sendFrame({
+        type: "host_uri_result",
+        id,
+        isError: true,
+        error: message,
+      });
+    }
+    this.pendingHostUris.clear();
   }
 
   private emit(event: AgentEvent): void {
@@ -479,6 +572,12 @@ export class AgentSessionWrapper {
     return () => {
       const i = this.listeners.indexOf(listener);
       if (i !== -1) this.listeners.splice(i, 1);
+      // No UI attached anymore: reject outstanding host tool calls so the
+      // agent never waits forever on a tool nobody will answer.
+      if (this.listeners.length === 0) {
+        this.rejectPendingHostTools("The web UI disconnected while the agent was waiting for this host tool");
+        this.rejectPendingHostUris("The web UI disconnected while the agent was waiting for this URI request");
+      }
     };
   }
 
@@ -524,6 +623,9 @@ export class AgentSessionWrapper {
         this.mcpListWaiter = null;
         rejectOutput(new WebRpcError("Timed out while loading MCP servers", "mcp_list_timeout"));
       }, MCP_LIST_TIMEOUT_MS);
+    // Don't pin the event loop if the caller never awaits (route aborted): the
+    // pending-UI timers already unref, this one should too.
+    waiter.timer.unref?.();
     this.mcpListWaiter = waiter;
 
     try {
@@ -564,6 +666,9 @@ export class AgentSessionWrapper {
       isBashRunning: this.bashRunning,
       isCompacting: state.isCompacting,
       autoCompactionEnabled: state.autoCompactionEnabled,
+      interruptMode: state.interruptMode,
+      steeringMode: state.steeringMode,
+      followUpMode: state.followUpMode,
       model: state.model
         ? {
             id: state.model.id,
@@ -860,6 +965,38 @@ export class AgentSessionWrapper {
         }
       }
 
+      case "set_host_tools": {
+        const tools = Array.isArray(command.tools) ? command.tools as Array<{ name?: unknown; [key: string]: unknown }> : [];
+        const valid = tools.filter((t) => typeof t.name === "string" && t.name);
+        this.hostToolNames = new Set(valid.map((t) => t.name as string));
+        await this.proc.sendCommand({ type: "set_host_tools", tools: valid });
+        return null;
+      }
+
+      case "host_tool_result": {
+        if (typeof command.id === "string") this.pendingHostTools.delete(command.id);
+        await this.proc.sendCommand(command as { type: string });
+        return null;
+      }
+
+      case "set_host_uri_schemes": {
+        const schemes = Array.isArray(command.schemes) ? command.schemes as Array<{ scheme?: unknown; writable?: unknown; [key: string]: unknown }> : [];
+        this.hostUriSchemes = new Map();
+        for (const entry of schemes) {
+          if (typeof entry.scheme === "string" && entry.scheme) {
+            this.hostUriSchemes.set(entry.scheme, { writable: entry.writable === true });
+          }
+        }
+        await this.proc.sendCommand({ type: "set_host_uri_schemes", schemes });
+        return null;
+      }
+
+      case "host_uri_result": {
+        if (typeof command.id === "string") this.pendingHostUris.delete(command.id);
+        await this.proc.sendCommand(command as { type: string });
+        return null;
+      }
+
       default: {
         if (PASSTHROUGH_COMMANDS.has(type)) {
           const result: unknown = await this.proc.sendCommand(command as { type: string });
@@ -879,6 +1016,9 @@ export class AgentSessionWrapper {
    * that delete the session file afterwards must await this — omp flushes
    * session state on shutdown and would otherwise recreate the file. */
   async destroyAndWait(): Promise<void> {
+    // Re-entrant calls join the in-flight dispose; without this a new spawn
+    // can overlap the old child's shutdown (see startRpcSession).
+    if (this.destroyPromise) return this.destroyPromise;
     if (!this._alive) return;
     this._alive = false;
     if (this.idleTimer) clearTimeout(this.idleTimer);
@@ -890,6 +1030,11 @@ export class AgentSessionWrapper {
       this.mcpListWaiter = null;
     }
     const disposed = this.proc.dispose().catch(() => {});
+    this.destroyPromise = disposed;
+    this.pendingHostTools.clear();
+    this.hostToolNames.clear();
+    this.pendingHostUris.clear();
+    this.hostUriSchemes.clear();
     this.onDestroyCallback?.();
     notifyRunningChange();
     await disposed;
@@ -1003,6 +1148,10 @@ export async function startRpcSession(
 
   const existing = registry.get(sessionId);
   if (existing?.isAlive()) return { session: existing, realSessionId: sessionId };
+  // A wrapper whose omp child is still flushing/exiting must fully dispose
+  // before a replacement spawns — two children touching the same .jsonl would
+  // race on resume/delete/archive.
+  if (existing?.destroyPromise) await existing.destroyPromise;
 
   const inflight = locks.get(sessionId);
   if (inflight) return inflight;
